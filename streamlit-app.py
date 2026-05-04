@@ -98,31 +98,14 @@ st.markdown("""
 # Helper functions
 def convert_binary_data(df):
     """Convert yes/no values to 1/0 for metrics columns"""
+    yes_values = {'yes', 'true', '1', 'y'}
     binary_columns = ['EmailsSent', 'EmailsOpened', 'EmailsClicked']
-    
+
     for col in binary_columns:
         if col in df.columns:
-            # Convert to lowercase strings first
-            df[col] = df[col].astype(str).str.lower()
-            
-            # Handle different variations of yes/no, true/false
-            yes_values = ['yes', 'true', '1', 'y']
-            no_values = ['no', 'false', '0', 'n']
-            
-            # Create a mask for each type of value
-            yes_mask = df[col].isin(yes_values)
-            no_mask = df[col].isin(no_values)
-            
-            # Apply the conversion
-            df.loc[yes_mask, col] = 1
-            df.loc[no_mask, col] = 0
-            
-            # Convert remaining values if possible
-            try:
-                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
-            except Exception:
-                st.warning(f"Some values in {col} could not be converted to binary values.")
-    
+            normalized = df[col].astype(str).str.strip().str.lower()
+            df[col] = normalized.isin(yes_values).astype(int)
+
     return df
 
 def calculate_metrics(df):
