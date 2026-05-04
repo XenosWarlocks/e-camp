@@ -4,8 +4,6 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import io
-import base64
 from datetime import datetime, timedelta
 
 # Page configuration
@@ -122,7 +120,7 @@ def convert_binary_data(df):
             # Convert remaining values if possible
             try:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
-            except:
+            except Exception:
                 st.warning(f"Some values in {col} could not be converted to binary values.")
     
     return df
@@ -152,8 +150,74 @@ def calculate_metrics(df):
     
     return result_df
 
+def build_insights_prompt(metrics: dict) -> str:
+    return f"""You are an expert email marketing analyst. Analyze the campaign metrics below and respond with:
+1. A 2-3 sentence overall engagement summary.
+2. Specific observations about open rate and click rate vs the industry benchmarks.
+3. 3-5 concrete, actionable recommendations to improve performance.
+4. The top company and job-role segments worth focusing on (use the breakdown tables provided).
+
+Be concise, data-driven, and format your response in Markdown.
+
+## Campaign Metrics
+| Metric | Value | Industry Avg |
+|--------|-------|-------------|
+| Total Recipients | {metrics['total_recipients']} | — |
+| Emails Sent | {metrics['total_sent']} | — |
+| Emails Opened | {metrics['total_opened']} | — |
+| Emails Clicked | {metrics['total_clicked']} | — |
+| Open Rate | {metrics['open_rate']:.1f}% | {metrics['benchmark_open_rate']}% |
+| Click Rate | {metrics['click_rate']:.1f}% | {metrics['benchmark_click_rate']}% |
+| Click-to-Open Rate | {metrics['ctor_rate']:.1f}% | {metrics['benchmark_ctor']}% |
+| Avg Engagement Score | {metrics['avg_engagement']:.1f} | — |
+
+## Company Breakdown (by Click Rate)
+{metrics['company_breakdown']}
+
+## Job Role Breakdown (by Click Rate)
+{metrics['role_breakdown']}
+
+## Active Filters
+- Company filter: {metrics['selected_company']}
+- Job Role filter: {metrics['selected_role']}
+"""
+
+
+def get_ai_insights_openai(prompt: str, api_key: str, model: str) -> tuple[str | None, str | None]:
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return None, "openai package not installed. Run: pip install openai"
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are an expert email marketing analyst providing data-driven insights."},
+                {"role": "user", "content": prompt},
+            ],
+            max_tokens=1200,
+            temperature=0.7,
+        )
+        return response.choices[0].message.content, None
+    except Exception as e:
+        return None, str(e)
+
+
+def get_ai_insights_gemini(prompt: str, api_key: str, model: str) -> tuple[str | None, str | None]:
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        return None, "google-generativeai package not installed. Run: pip install google-generativeai"
+    try:
+        genai.configure(api_key=api_key)
+        response = genai.GenerativeModel(model).generate_content(prompt)
+        return response.text, None
+    except Exception as e:
+        return None, str(e)
+
+
 def generate_industry_benchmarks():
-    """Generate fake industry benchmarks for comparison"""
     return {
         'OpenRate': {
             'Marketing': 21.5,
@@ -195,16 +259,36 @@ with st.sidebar:
     # Load Sample Data option
     load_sample = st.button("Load Sample Data")
     
-    # Add separator
+    # AI Insights configuration
     st.markdown("<hr>", unsafe_allow_html=True)
-    
-    # Dark Mode Toggle
-    theme_mode = st.toggle("Dark Mode", False)
-    
-    # Add separator
-    st.markdown("<hr>", unsafe_allow_html=True)
-    
+    st.subheader("AI Insights")
+    ai_provider = st.selectbox(
+        "AI Provider",
+        ["None", "OpenAI", "Google Gemini"],
+        help="Select a provider and enter your API key to generate AI-powered insights.",
+    )
+
+    ai_api_key = ""
+    ai_model = ""
+
+    if ai_provider == "OpenAI":
+        ai_api_key = st.text_input(
+            "OpenAI API Key",
+            type="password",
+            placeholder="sk-...",
+        )
+        ai_model = st.selectbox("Model", ["gpt-4o", "gpt-4o-mini"])
+
+    elif ai_provider == "Google Gemini":
+        ai_api_key = st.text_input(
+            "Gemini API Key",
+            type="password",
+            placeholder="AIza...",
+        )
+        ai_model = st.selectbox("Model", ["gemini-2.0-flash", "gemini-2.5-pro"])
+
     # Display industry benchmarks in sidebar
+    st.markdown("<hr>", unsafe_allow_html=True)
     st.subheader("Industry Benchmarks")
     benchmarks = generate_industry_benchmarks()
     
@@ -229,11 +313,11 @@ def create_sample_data():
             'John Smith', 'Jessica Brown', 'David Wilson', 'Emily Davis',
             'Michael Lee', 'Sarah Johnson', 'Robert Chen', 'Amanda White',
             'Thomas Moore', 'Lisa Garcia', 'James Taylor', 'Jennifer Martin',
-            'William Adams', 'Olivia King'
+            'William Adams', 'Olivia King', 'Daniel Scott'
         ],
-        'EmailsSent': ['yes'] * 18,
-        'EmailsOpened': ['yes', 'no', 'yes', 'yes'] + ['yes', 'no'] * 7,
-        'EmailsClicked': ['no', 'no', 'no', 'yes'] + ['yes', 'no'] * 7
+        'EmailsSent': ['yes'] * 19,
+        'EmailsOpened': ['yes', 'no', 'yes', 'yes'] + ['yes', 'no'] * 7 + ['yes'],
+        'EmailsClicked': ['no', 'no', 'no', 'yes'] + ['yes', 'no'] * 7 + ['no']
     }
     return pd.DataFrame(data)
 
@@ -618,22 +702,30 @@ if df is not None:
             st.subheader("Email Engagement Details")
             
             # Display company and job role details about who opened/clicked
-            company_job_engagement = filtered_df.groupby(['Company', 'JobRole']).agg({
-                'EmailsSent': 'sum',
-                'EmailsOpened': 'sum',
-                'EmailsClicked': 'sum',
-                'PersonName': lambda x: ', '.join(filtered_df.loc[filtered_df.loc[x.index]['EmailsOpened'] == 1, 'PersonName'])
-            }).reset_index()
-            
-            # Rename columns
-            company_job_engagement.rename(columns={
-                'PersonName': 'People Who Opened'
-            }, inplace=True)
-            
-            # Add people who clicked
-            company_job_engagement['People Who Clicked'] = filtered_df.groupby(['Company', 'JobRole']).apply(
-                lambda x: ', '.join(x.loc[x['EmailsClicked'] == 1, 'PersonName'])
-            ).reset_index(drop=True)
+            company_job_engagement = filtered_df.groupby(['Company', 'JobRole']).agg(
+                EmailsSent=('EmailsSent', 'sum'),
+                EmailsOpened=('EmailsOpened', 'sum'),
+                EmailsClicked=('EmailsClicked', 'sum'),
+            ).reset_index()
+
+            people_opened = (
+                filtered_df.groupby(['Company', 'JobRole'])
+                .apply(lambda x: ', '.join(x.loc[x['EmailsOpened'] == 1, 'PersonName']))
+                .rename('People Who Opened')
+                .reset_index()
+            )
+            people_clicked = (
+                filtered_df.groupby(['Company', 'JobRole'])
+                .apply(lambda x: ', '.join(x.loc[x['EmailsClicked'] == 1, 'PersonName']))
+                .rename('People Who Clicked')
+                .reset_index()
+            )
+
+            company_job_engagement = (
+                company_job_engagement
+                .merge(people_opened, on=['Company', 'JobRole'])
+                .merge(people_clicked, on=['Company', 'JobRole'])
+            )
             
             # Count total people per company/role combination
             people_count = filtered_df.groupby(['Company', 'JobRole']).size().reset_index(name='Total People')
@@ -666,48 +758,119 @@ if df is not None:
 
             # Add export functionality
             csv = detailed_table.to_csv(index=False)
-
-            b64 = base64.b64encode(csv.encode()).decode()
-            href = f'<a href="data:file/csv;base64,{b64}" download="email_engagement_report.csv">Download CSV Report</a>'
-            st.markdown(href, unsafe_allow_html=True)
+            st.download_button(
+                label="Download CSV Report",
+                data=csv,
+                file_name="email_engagement_report.csv",
+                mime="text/csv",
+            )
         
         # Insights and recommendations section
         st.markdown('<div class="sub-header">Insights & Recommendations</div>', unsafe_allow_html=True)
-        
+
+        industry_benchmarks = generate_industry_benchmarks()
+
+        # Build segment breakdowns for the prompt
+        company_summary = filtered_df.groupby('Company').agg(
+            EmailsSent=('EmailsSent', 'sum'),
+            EmailsClicked=('EmailsClicked', 'sum'),
+        )
+        company_summary['ClickRate'] = np.where(
+            company_summary['EmailsSent'] > 0,
+            company_summary['EmailsClicked'] / company_summary['EmailsSent'] * 100,
+            0,
+        )
+        company_breakdown_str = company_summary.sort_values('ClickRate', ascending=False).to_string()
+
+        role_summary = filtered_df.groupby('JobRole').agg(
+            EmailsSent=('EmailsSent', 'sum'),
+            EmailsClicked=('EmailsClicked', 'sum'),
+        )
+        role_summary['ClickRate'] = np.where(
+            role_summary['EmailsSent'] > 0,
+            role_summary['EmailsClicked'] / role_summary['EmailsSent'] * 100,
+            0,
+        )
+        role_breakdown_str = role_summary.sort_values('ClickRate', ascending=False).to_string()
+
+        metrics_payload = {
+            'total_recipients': len(filtered_df),
+            'total_sent': int(total_sent),
+            'total_opened': int(total_opened),
+            'total_clicked': int(total_clicked),
+            'open_rate': open_rate,
+            'click_rate': click_rate,
+            'ctor_rate': ctor_rate,
+            'avg_engagement': float(avg_engagement),
+            'benchmark_open_rate': industry_benchmarks['OpenRate']['Overall'],
+            'benchmark_click_rate': industry_benchmarks['ClickRate']['Overall'],
+            'benchmark_ctor': industry_benchmarks['CTOR']['Overall'],
+            'company_breakdown': company_breakdown_str,
+            'role_breakdown': role_breakdown_str,
+            'selected_company': selected_company,
+            'selected_role': selected_role,
+        }
+
+        if 'ai_insights' not in st.session_state:
+            st.session_state.ai_insights = None
+
         with st.expander("View Insights", expanded=True):
             if not filtered_df.empty:
-                # Calculate engagement metrics for insights
+                # --- AI insights panel ---
+                if ai_provider != "None":
+                    col_btn, col_clear = st.columns([2, 1])
+                    with col_btn:
+                        generate_btn = st.button(
+                            f"Generate AI Insights ({ai_provider} / {ai_model})",
+                            disabled=not ai_api_key,
+                            help="Enter your API key in the sidebar to enable this button.",
+                        )
+                    with col_clear:
+                        if st.button("Clear AI Insights"):
+                            st.session_state.ai_insights = None
+
+                    if generate_btn and ai_api_key:
+                        prompt = build_insights_prompt(metrics_payload)
+                        with st.spinner(f"Generating insights with {ai_provider}…"):
+                            if ai_provider == "OpenAI":
+                                result, error = get_ai_insights_openai(prompt, ai_api_key, ai_model)
+                            else:
+                                result, error = get_ai_insights_gemini(prompt, ai_api_key, ai_model)
+
+                        if error:
+                            st.error(f"AI error: {error}")
+                            st.session_state.ai_insights = None
+                        else:
+                            st.session_state.ai_insights = result
+
+                    if st.session_state.ai_insights:
+                        st.markdown("#### AI-Generated Insights")
+                        st.markdown(st.session_state.ai_insights)
+                        st.markdown("---")
+
+                # --- Rule-based insights (always shown as a baseline) ---
                 total_recipients = len(filtered_df)
-                engaged_recipients = len(filtered_df[filtered_df['EmailsOpened'] == 1])
-                click_recipients = len(filtered_df[filtered_df['EmailsClicked'] == 1])
-                
-                # Industry benchmarks for comparison
-                industry_benchmarks = generate_industry_benchmarks()
-                
-                # Generate insights based on the data
                 st.markdown(f"""
                 <div class="engagement-stats">
                     <h3>Overall Engagement</h3>
                     <ul>
                         <li>Your email campaign reached <span class="stats-highlight">{total_recipients}</span> recipients.</li>
-                        <li>Your open rate is <span class="stats-highlight">{open_rate:.1f}%</span>, which is 
-                            {'<span class="stats-highlight">above</span>' if open_rate > industry_benchmarks['OpenRate']['Overall'] else '<span class="stats-highlight">below</span>'} 
+                        <li>Your open rate is <span class="stats-highlight">{open_rate:.1f}%</span>, which is
+                            {'<span class="stats-highlight">above</span>' if open_rate > industry_benchmarks['OpenRate']['Overall'] else '<span class="stats-highlight">below</span>'}
                             the industry average of {industry_benchmarks['OpenRate']['Overall']}%.</li>
-                        <li>Your click rate is <span class="stats-highlight">{click_rate:.1f}%</span>, which is 
-                            {'<span class="stats-highlight">above</span>' if click_rate > industry_benchmarks['ClickRate']['Overall'] else '<span class="stats-highlight">below</span>'} 
+                        <li>Your click rate is <span class="stats-highlight">{click_rate:.1f}%</span>, which is
+                            {'<span class="stats-highlight">above</span>' if click_rate > industry_benchmarks['ClickRate']['Overall'] else '<span class="stats-highlight">below</span>'}
                             the industry average of {industry_benchmarks['ClickRate']['Overall']}%.</li>
                     </ul>
                 </div>
                 """, unsafe_allow_html=True)
-                
-                # Generate recommendations based on metrics
+
                 st.markdown("""
                 <div class="engagement-stats">
                     <h3>Recommendations</h3>
                     <ul>
                 """, unsafe_allow_html=True)
-                
-                # Open rate recommendations
+
                 if open_rate < industry_benchmarks['OpenRate']['Overall']:
                     st.markdown("""
                     <li>To improve your <b>open rate</b>:
@@ -729,8 +892,7 @@ if df is not None:
                         </ul>
                     </li>
                     """, unsafe_allow_html=True)
-                
-                # Click rate recommendations
+
                 if click_rate < industry_benchmarks['ClickRate']['Overall']:
                     st.markdown("""
                     <li>To improve your <b>click rate</b>:
@@ -752,38 +914,31 @@ if df is not None:
                         </ul>
                     </li>
                     """, unsafe_allow_html=True)
-                
-                # Targeting recommendations
-                if selected_company == 'All Companies' and selected_role == 'All Roles':
-                    # Find top performing segments
-                    if 'company_engagement' in locals():
-                        top_company = company_engagement.sort_values('ClickRate', ascending=False).iloc[0]
-                        top_company_name = top_company['Company']
-                        top_company_click_rate = top_company['ClickRate']
-                        
-                        st.markdown(f"""
-                        <li>Consider focusing more on <b>{top_company_name}</b>:
-                            <ul>
-                                <li>This company shows the highest engagement with a click rate of {top_company_click_rate:.1f}%</li>
-                                <li>Consider creating more targeted content for this audience</li>
-                            </ul>
-                        </li>
-                        """, unsafe_allow_html=True)
-                    
-                    if 'role_engagement' in locals():
-                        top_role = role_engagement.sort_values('ClickRate', ascending=False).iloc[0]
-                        top_role_name = top_role['JobRole']
-                        top_role_click_rate = top_role['ClickRate']
-                        
-                        st.markdown(f"""
-                        <li>The <b>{top_role_name}</b> role responds best to your emails:
-                            <ul>
-                                <li>This role shows a click rate of {top_role_click_rate:.1f}%</li>
-                                <li>Consider tailoring future content to address their specific needs</li>
-                            </ul>
-                        </li>
-                        """, unsafe_allow_html=True)
-                
+
+                if not company_summary.empty:
+                    top_company = company_summary['ClickRate'].idxmax()
+                    top_company_cr = company_summary.loc[top_company, 'ClickRate']
+                    st.markdown(f"""
+                    <li>Consider focusing more on <b>{top_company}</b>:
+                        <ul>
+                            <li>Highest engagement with a click rate of {top_company_cr:.1f}%</li>
+                            <li>Consider creating more targeted content for this audience</li>
+                        </ul>
+                    </li>
+                    """, unsafe_allow_html=True)
+
+                if not role_summary.empty:
+                    top_role = role_summary['ClickRate'].idxmax()
+                    top_role_cr = role_summary.loc[top_role, 'ClickRate']
+                    st.markdown(f"""
+                    <li>The <b>{top_role}</b> role responds best to your emails:
+                        <ul>
+                            <li>Click rate of {top_role_cr:.1f}%</li>
+                            <li>Consider tailoring future content to address their specific needs</li>
+                        </ul>
+                    </li>
+                    """, unsafe_allow_html=True)
+
                 st.markdown("""
                     </ul>
                 </div>
@@ -887,14 +1042,15 @@ if df is not None:
                 expected_clicks = int(sim_emails * improved_click_rate)
                 
                 # Create time series data for visualization
+                now = datetime.now()
                 if sim_period == "Next week":
-                    dates = [datetime.now() + timedelta(days=i) for i in range(7)]
+                    dates = [now + timedelta(days=i) for i in range(7)]
                     daily_emails = [int(sim_emails / 7) for _ in range(7)]
                 elif sim_period == "Next month":
-                    dates = [datetime.now() + timedelta(days=i) for i in range(0, 30, 3)]
+                    dates = [now + timedelta(days=i) for i in range(0, 30, 3)]
                     daily_emails = [int(sim_emails / 10) for _ in range(10)]
                 else:  # Next quarter
-                    dates = [datetime.now() + timedelta(days=i) for i in range(0, 90, 9)]
+                    dates = [now + timedelta(days=i) for i in range(0, 90, 9)]
                     daily_emails = [int(sim_emails / 10) for _ in range(10)]
                 
                 # Add some randomness to make it realistic
